@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Live Transcription</title>
+  <style>
+    :root {
+      --bg:#0f1115; --panel:#171a21; --border:#2a2e37; --text:#e6e8eb;
+      --muted:#8b909c; --accent:#5b8cff; --accent-dim:#2d3f70; --live:#3ddc84; --danger:#ff5b5b;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background:var(--bg); color:var(--text); padding:20px 16px; margin:0; }
+    h1 { font-size:1.3rem; margin:0 0 4px; }
+    .subtitle { color:var(--muted); font-size:0.85rem; margin-bottom:16px; line-height:1.4; }
+    .controls { display:flex; gap:10px; margin-bottom:14px; }
+    button { flex:1; padding:14px; border-radius:12px; border:none; font-size:1rem; font-weight:600; cursor:pointer; }
+    #startBtn { background:var(--accent); color:white; }
+    #startBtn:disabled { background:var(--accent-dim); color:var(--muted); }
+    #stopBtn { background:var(--panel); color:var(--text); border:1px solid var(--border); }
+    #stopBtn:disabled { opacity:0.4; }
+    .status-row { display:flex; align-items:center; gap:8px; margin:10px 0; font-size:0.85rem; color:var(--muted); }
+    .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); flex-shrink:0; }
+    .dot.live { background:var(--live); box-shadow:0 0 8px var(--live); animation:pulse 1.4s infinite; }
+    .dot.error { background:var(--danger); }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+    .progress-track { width:100%; height:6px; background:var(--panel); border-radius:4px; overflow:hidden; margin-bottom:14px; border:1px solid var(--border); }
+    .progress-fill { height:100%; width:0%; background:var(--accent); transition:width 0.2s; }
+    #transcript { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:16px;
+      min-height:180px; font-size:1rem; line-height:1.6; white-space:pre-wrap; }
+    .placeholder { color:var(--muted); font-style:italic; }
+    .note { margin-top:16px; padding:12px 14px; background:var(--panel); border:1px solid var(--border);
+      border-radius:10px; font-size:0.78rem; color:var(--muted); line-height:1.5; }
+    .note strong { color:var(--text); }
+  </style>
+</head>
+<body>
+  <h1>Live Transcription</h1>
+  <div class="subtitle">Captures another app's actual system audio, then transcribes it fully on this device.</div>
+
+  <div class="controls">
+    <button id="startBtn">Start Capture</button>
+    <button id="stopBtn" disabled>Stop &amp; Transcribe</button>
+  </div>
+
+  <div class="status-row">
+    <span id="statusDot" class="dot"></span>
+    <span id="statusText">Idle — tap Start, grant permission, then play audio in another app</span>
+  </div>
+
+  <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+
+  <div id="transcript"><span class="placeholder">Transcript will appear here after you capture and stop.</span></div>
+
+  <div class="note">
+    <strong>How to use:</strong> tap Start Capture, grant the system permission, switch to YouTube/Box/etc. and play audio, then come back and tap Stop &amp; Transcribe.
+    <br><br>
+    <strong>Privacy:</strong> transcription runs fully on-device via a local Whisper model (downloaded once, then works offline) — no audio is uploaded anywhere.
+  </div>
+
+  <script type="module">
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+    env.allowLocalModels = false;
+
+    const AudioCapture = window.Capacitor.registerPlugin('AudioCapture');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const progressFill = document.getElementById('progressFill');
+    const transcriptEl = document.getElementById('transcript');
+
+    let transcriber = null;
+
+    function setStatus(text, mode) {
+      statusText.textContent = text;
+      statusDot.className = 'dot' + (mode ? ' ' + mode : '');
+    }
+    function setProgress(pct) {
+      progressFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    }
+
+    startBtn.addEventListener('click', async () => {
+      try {
+        setStatus('Requesting permission…', '');
+        await AudioCapture.requestAndStart();
+        setStatus('Capturing system audio… switch to another app and play something', 'live');
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+      } catch (e) {
+        setStatus('Error: ' + e.message, 'error');
+      }
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      setStatus('Stopping capture…', '');
+      await AudioCapture.stop();
+
+      // The WAV file finishes writing slightly after stop() returns
+      // (it happens in the service's onDestroy) — give it a moment.
+      await new Promise(r => setTimeout(r, 1200));
+
+      try {
+        setStatus('Reading recording…', '');
+        const { base64 } = await AudioCapture.getRecording();
+        const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        const arrayBuffer = bytes.buffer;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        const channelData = audioBuffer.getChannelData(0);
+
+        if (!transcriber) {
+          setStatus('Downloading model (first run only)…', '');
+          transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+            progress_callback: (data) => {
+              if (data.status === 'progress' && data.total) {
+                const pct = (data.loaded / data.total) * 100;
+                setProgress(pct);
+                setStatus(`Downloading model… ${Math.round(pct)}%`, '');
+              }
+            }
+          });
+        }
+
+        setStatus('Transcribing…', 'live');
+        const output = await transcriber(channelData, { chunk_length_s: 30, stride_length_s: 5 });
+
+        transcriptEl.textContent = output.text || '(No speech detected — try a louder source or check the app allows capture.)';
+        setStatus('Done', '');
+        setProgress(100);
+      } catch (e) {
+        setStatus('Error: ' + e.message, 'error');
+        transcriptEl.innerHTML = '<span class="placeholder">Something went wrong — see status above.</span>';
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
