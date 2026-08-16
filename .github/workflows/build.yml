@@ -31,10 +31,12 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
+        
+      - name: Build debug APK 
+        working-directory: android 
+        run: ./gradlew assembleDebug --stacktrace || (sleep 20 && ./gradlew assembleDebug --stacktrace) || (sleep 20 && ./gradlew assembleDebug --stacktrace) 
 
-      - name: Build debug APK
-        working-directory: android
-        run: ./gradlew assembleDebug --stacktrace
+
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
