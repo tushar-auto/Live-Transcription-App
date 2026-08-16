@@ -24,7 +24,7 @@ jobs:
           node-version: '22'
 
       - name: Install npm dependencies
-        run: npm install
+        run: npm install && npm install -D typescript 
 
       - name: Sync Capacitor (copies www into android assets)
         run: npx cap sync android
