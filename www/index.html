@@ -89,20 +89,39 @@
         progressFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
       }
 
-      if (!window.Capacitor || !window.Capacitor.registerPlugin) {
-        setStatus('Error: native bridge not found (Capacitor did not load)', 'error');
-        return;
+      function waitForCapacitor(timeoutMs) {
+        return new Promise((resolve, reject) => {
+          const start = Date.now();
+          (function check() {
+            if (window.Capacitor && window.Capacitor.registerPlugin) {
+              resolve();
+            } else if (Date.now() - start > timeoutMs) {
+              reject(new Error('native bridge not found (Capacitor did not load) after ' + timeoutMs + 'ms'));
+            } else {
+              setTimeout(check, 100);
+            }
+          })();
+        });
       }
 
       let AudioCapture;
-      try {
-        AudioCapture = window.Capacitor.registerPlugin('AudioCapture');
-      } catch (e) {
-        setStatus('Error registering plugin: ' + e.message, 'error');
-        return;
-      }
+      setStatus('Waiting for native bridge…', '');
+      waitForCapacitor(3000).then(() => {
+        try {
+          AudioCapture = window.Capacitor.registerPlugin('AudioCapture');
+          setStatus('Idle — tap Start, grant permission, then play audio in another app', '');
+        } catch (e) {
+          setStatus('Error registering plugin: ' + e.message, 'error');
+        }
+      }).catch((e) => {
+        setStatus('Error: ' + e.message, 'error');
+      });
 
       startBtn.addEventListener('click', async () => {
+        if (!AudioCapture) {
+          setStatus('Still connecting to the app — wait a moment and try again', 'error');
+          return;
+        }
         try {
           setStatus('Requesting permission…', '');
           await AudioCapture.requestAndStart();
