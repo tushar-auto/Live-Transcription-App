@@ -59,84 +59,112 @@
     <strong>Privacy:</strong> transcription runs fully on-device via a local Whisper model (downloaded once, then works offline) — no audio is uploaded anywhere.
   </div>
 
-  <script type="module">
-    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
-    env.allowLocalModels = false;
-
-    const AudioCapture = window.Capacitor.registerPlugin('AudioCapture');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const statusDot = document.getElementById('statusDot');
-    const statusText = document.getElementById('statusText');
-    const progressFill = document.getElementById('progressFill');
-    const transcriptEl = document.getElementById('transcript');
-
-    let transcriber = null;
-
-    function setStatus(text, mode) {
-      statusText.textContent = text;
-      statusDot.className = 'dot' + (mode ? ' ' + mode : '');
-    }
-    function setProgress(pct) {
-      progressFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
-    }
-
-    startBtn.addEventListener('click', async () => {
-      try {
-        setStatus('Requesting permission…', '');
-        await AudioCapture.requestAndStart();
-        setStatus('Capturing system audio… switch to another app and play something', 'live');
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
-      } catch (e) {
-        setStatus('Error: ' + e.message, 'error');
+  <script>
+    // Surface any otherwise-silent script errors directly in the status
+    // line, since there's no way to open devtools on this device.
+    window.addEventListener('error', (e) => {
+      const statusText = document.getElementById('statusText');
+      const statusDot = document.getElementById('statusDot');
+      if (statusText) {
+        statusText.textContent = 'Script error: ' + e.message;
+        if (statusDot) statusDot.className = 'dot error';
       }
     });
 
-    stopBtn.addEventListener('click', async () => {
-      stopBtn.disabled = true;
-      setStatus('Stopping capture…', '');
-      await AudioCapture.stop();
+    document.addEventListener('DOMContentLoaded', () => {
+      const startBtn = document.getElementById('startBtn');
+      const stopBtn = document.getElementById('stopBtn');
+      const statusDot = document.getElementById('statusDot');
+      const statusText = document.getElementById('statusText');
+      const progressFill = document.getElementById('progressFill');
+      const transcriptEl = document.getElementById('transcript');
 
-      // The WAV file finishes writing slightly after stop() returns
-      // (it happens in the service's onDestroy) — give it a moment.
-      await new Promise(r => setTimeout(r, 1200));
+      let transcriber = null;
 
-      try {
-        setStatus('Reading recording…', '');
-        const { base64 } = await AudioCapture.getRecording();
-        const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-        const arrayBuffer = bytes.buffer;
-
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-        const channelData = audioBuffer.getChannelData(0);
-
-        if (!transcriber) {
-          setStatus('Downloading model (first run only)…', '');
-          transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
-            progress_callback: (data) => {
-              if (data.status === 'progress' && data.total) {
-                const pct = (data.loaded / data.total) * 100;
-                setProgress(pct);
-                setStatus(`Downloading model… ${Math.round(pct)}%`, '');
-              }
-            }
-          });
-        }
-
-        setStatus('Transcribing…', 'live');
-        const output = await transcriber(channelData, { chunk_length_s: 30, stride_length_s: 5 });
-
-        transcriptEl.textContent = output.text || '(No speech detected — try a louder source or check the app allows capture.)';
-        setStatus('Done', '');
-        setProgress(100);
-      } catch (e) {
-        setStatus('Error: ' + e.message, 'error');
-        transcriptEl.innerHTML = '<span class="placeholder">Something went wrong — see status above.</span>';
-      } finally {
-        startBtn.disabled = false;
+      function setStatus(text, mode) {
+        statusText.textContent = text;
+        statusDot.className = 'dot' + (mode ? ' ' + mode : '');
       }
+      function setProgress(pct) {
+        progressFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      }
+
+      if (!window.Capacitor || !window.Capacitor.registerPlugin) {
+        setStatus('Error: native bridge not found (Capacitor did not load)', 'error');
+        return;
+      }
+
+      let AudioCapture;
+      try {
+        AudioCapture = window.Capacitor.registerPlugin('AudioCapture');
+      } catch (e) {
+        setStatus('Error registering plugin: ' + e.message, 'error');
+        return;
+      }
+
+      startBtn.addEventListener('click', async () => {
+        try {
+          setStatus('Requesting permission…', '');
+          await AudioCapture.requestAndStart();
+          setStatus('Capturing system audio… switch to another app and play something', 'live');
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        } catch (e) {
+          setStatus('Error: ' + e.message, 'error');
+        }
+      });
+
+      stopBtn.addEventListener('click', async () => {
+        stopBtn.disabled = true;
+        setStatus('Stopping capture…', '');
+        try {
+          await AudioCapture.stop();
+
+          // The WAV file finishes writing slightly after stop() returns
+          // (it happens in the service's onDestroy) — give it a moment.
+          await new Promise(r => setTimeout(r, 1200));
+
+          setStatus('Reading recording…', '');
+          const { base64 } = await AudioCapture.getRecording();
+          const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+          const arrayBuffer = bytes.buffer;
+
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const channelData = audioBuffer.getChannelData(0);
+
+          if (!transcriber) {
+            // Loaded lazily here, not at page load — so a slow/blocked
+            // CDN fetch can never prevent the Start button from working.
+            setStatus('Loading transcription library…', '');
+            const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+            env.allowLocalModels = false;
+
+            setStatus('Downloading model (first run only)…', '');
+            transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+              progress_callback: (data) => {
+                if (data.status === 'progress' && data.total) {
+                  const pct = (data.loaded / data.total) * 100;
+                  setProgress(pct);
+                  setStatus(`Downloading model… ${Math.round(pct)}%`, '');
+                }
+              }
+            });
+          }
+
+          setStatus('Transcribing…', 'live');
+          const output = await transcriber(channelData, { chunk_length_s: 30, stride_length_s: 5 });
+
+          transcriptEl.textContent = output.text || '(No speech detected — try a louder source or check the app allows capture.)';
+          setStatus('Done', '');
+          setProgress(100);
+        } catch (e) {
+          setStatus('Error: ' + e.message, 'error');
+          transcriptEl.innerHTML = '<span class="placeholder">Something went wrong — see status above.</span>';
+        } finally {
+          startBtn.disabled = false;
+        }
+      });
     });
   </script>
 </body>
